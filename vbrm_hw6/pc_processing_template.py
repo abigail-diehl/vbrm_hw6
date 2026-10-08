@@ -152,18 +152,22 @@ class PointCloudGrasping(Node):
         filtered = filtered.pass_through(axis="x", minimum = self.table_planeX, maximum = 20.0)
 
         #Part 1.3: Segment the Table Frame: 
-        inliers, coefficients = filtered.segment_plane(distance_threshold = 5, max_iterations = 50)
-        if not inliers: 
-            self.get_logger().info(f"fitting failed")
-            return 1
+        inliers, coefficients = self.find_horizontal_plane(filtered)
 
-        segmented = cloud.extract(inliers)
+        if inliers is None: 
+            self.get_logger().info(f"Could not find horizontal plane")
+            return 
 
-        self.get_logger().info(f"segmented PC!")
-        
-        header = Header(stamp=msg.header.stamp, frame_id=self.target_frame)
+        segmented = filtered.extract(inliers)
 
-        self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, segmented.xyz))
+        #Part 1.4: Segment the Objects: 
+
+        segmentedObjects = filtered.extract(inliers, negative = True)
+
+        cylinderObject = self.find_cylinder_object(segmentedObjects)
+
+        header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
+        self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
 
         pose = self.estimate_grasp(segmented)
 
@@ -182,7 +186,120 @@ class PointCloudGrasping(Node):
 
         return None
 
+    def find_horizontal_plane(self, cloud):
 
+        curr_cloud = cloud
+
+        for i in range(10):
+
+            if len(curr_cloud) < 3:
+                break
+
+            # Find the largest plane in the current cloud
+            inliers, coefficients = curr_cloud.segment_plane(
+                distance_threshold=0.005,
+                max_iterations=50
+            )
+
+            self.get_logger().info(
+                f"Plane {i}: {len(inliers)} inliers"
+            )
+
+            if not inliers:
+                break
+
+            # Plane equation:
+            # ax + by + cz + d = 0
+            a, b, c, d = coefficients
+
+            normal = np.array(
+                [a, b, c],
+                dtype=np.float64
+            )
+
+            norm = np.linalg.norm(normal)
+
+            if norm == 0:
+                break
+
+            # Normalize normal
+            normal /= norm
+
+            # Horizontal plane should have normal parallel to Z
+            z_alignment = abs(normal[2])
+
+            # self.get_logger().info(
+            #     f"normal = {normal}, "
+            #     f"z_alignment = {z_alignment:.3f}"
+            # )
+
+            # Found horizontal plane
+            if z_alignment >= np.cos(np.deg2rad(15.0)):
+
+                # self.get_logger().info(
+                #     "found it!"
+                # )
+
+                return inliers, coefficients
+
+            # This plane is not horizontal.
+            # Remove it and search again.
+            all_indices = np.arange(len(curr_cloud))
+
+            inlier_set = set(inliers)
+
+            remaining_indices = [
+                idx for idx in all_indices
+                if idx not in inlier_set
+            ]
+
+            curr_cloud = curr_cloud.extract(remaining_indices)
+
+        return None, None
+
+    def find_cylinder_object(self, cloud):
+        normals = cloud.estimate_normals(radius = 0.02)
+        valid = np.isfinite(normals).all(axis =1 )
+        valid &= np.linalg.norm(normals, axis=1) > 1e-8
+
+        cloud = cloud.extract(np.flatnonzero(valid).tolist())
+        normals = normals[valid]
+
+        plane_indices, plane_coefficients = cloud.segment_plane(distance_threshold=0.03, max_iterations=100)
+
+        if not plane_indices:
+            raise RuntimeError(f"no plane found :(")
+
+        plane = cloud.extract(plane_indices)
+
+        keep = np.ones(len(cloud), dtype=bool)
+        keep[plane_indices] = False
+        remaining = cloud.extract(np.flatnonzero(keep).tolist())
+        remaining_normals = normals[keep]
+
+        if len(remaining) < 3: 
+            raise RuntimeError(f"Not enough for a cylinder!")
+
+        indices, coefficients = remaining.segment_cylinder(
+            normals = remaining_normals, 
+            distance_threshold = 0.05,
+            min_radius = 0.0,
+            max_radius = 0.1,
+            max_iterations = 10000,
+            normal_distance_weight = 0.1
+        )
+
+        if not indices: 
+            raise RuntimeError(f"No cyliner found :( ")
+
+        cylinder = remaining.extract(indices)
+
+        if cylinder:
+            return cylinder
+
+        return None
+
+                
 def main(args=None):
     rclpy.init(args=args)
     node = PointCloudGrasping()
