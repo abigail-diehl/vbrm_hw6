@@ -167,9 +167,15 @@ class PointCloudGrasping(Node):
 
         segmentedObjects = filtered.extract(inliers, negative = True)
 
+
+        #Part 1.5: Cluster the objs
         cylinderObject = self.find_cylinder_object(segmentedObjects)
 
+        #Part 2.1: Calculate the Obj Centroid
         centroid = self.find_cylinder_center(cylinderObject)
+
+        #Part 2.2: Estimate surface normals
+
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
@@ -185,9 +191,107 @@ class PointCloudGrasping(Node):
 
         return cloud
 
+    def get_surface_normals(self, cloud, viewpoint):
+        viewpoint = [0.0, 0.0, 1.0]
+        normals = cloud.estimate_normals(radius = 0.3)
+        self.get_logger().info(f"nromal array shape: {normals.shape}")
+
+        valid = np.isfinite(normals).all(axis=1)
+        valid &= np.linalg.norm(normals, axis = 1) > 1e-8
+
+        usableCloud = cloud.extract(np.flatnonzero(valid).tolist())
+        usableNormals = normals[valid]
+
+        if len(usableCloud) == 0: 
+            raise RuntimeError("No usable normals :(")
+
+        withCurvature = cloud.normals_with_curvature(
+            radius = 0.03, viewpoint = viewpoint)
+
+
+        return withCurvature
+
     def estimate_grasp(self, cloud) -> Pose | None:
 
         #TODO: estimate the grasp from the PC
+
+        return None
+
+
+    def find_cylinder_center(self, cloud):
+            centroid = np.mean(cloud.xyz, axis=0)
+    
+            # Publishing: generated this print
+    
+            marker = Marker()
+    
+            marker.header.frame_id = self.target_frame
+            marker.header.stamp = self.get_clock().now().to_msg()
+    
+            marker.ns = 'centroid'
+            marker.id = 0
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+    
+            marker.pose.position.x = float(centroid[0])
+            marker.pose.position.y = float(centroid[1])
+            marker.pose.position.z = float(centroid[2])
+    
+            marker.pose.orientation.w = 1.0
+    
+            marker.scale.x = 0.03
+            marker.scale.y = 0.03
+            marker.scale.z = 0.03
+    
+            marker.color.a = 1.0
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+    
+            self.centroid_publisher.publish(marker)
+            self.get_logger().info(f"found centroid: {centroid}")
+    
+            return centroid
+    
+    def find_cylinder_object(self, cloud):
+        normals = cloud.estimate_normals(radius = 0.02)
+        valid = np.isfinite(normals).all(axis =1 )
+        valid &= np.linalg.norm(normals, axis=1) > 1e-8
+
+        cloud = cloud.extract(np.flatnonzero(valid).tolist())
+        normals = normals[valid]
+
+        plane_indices, plane_coefficients = cloud.segment_plane(distance_threshold=0.03, max_iterations=100)
+
+        if not plane_indices:
+            raise RuntimeError(f"no plane found :(")
+
+        plane = cloud.extract(plane_indices)
+
+        keep = np.ones(len(cloud), dtype=bool)
+        keep[plane_indices] = False
+        remaining = cloud.extract(np.flatnonzero(keep).tolist())
+        remaining_normals = normals[keep]
+
+        if len(remaining) < 3: 
+            raise RuntimeError(f"Not enough for a cylinder!")
+
+        indices, coefficients = remaining.segment_cylinder(
+            normals = remaining_normals, 
+            distance_threshold = 0.05,
+            min_radius = 0.0,
+            max_radius = 0.1,
+            max_iterations = 10000,
+            normal_distance_weight = 0.1
+        )
+
+        if not indices: 
+            raise RuntimeError(f"No cyliner found :( ")
+
+        cylinder = remaining.extract(indices)
+
+        if cylinder:
+            return cylinder
 
         return None
 
@@ -262,82 +366,6 @@ class PointCloudGrasping(Node):
 
         return None, None
 
-    def find_cylinder_center(self, cloud):
-        centroid = np.mean(cloud.xyz, axis=0)
-
-        # Publishing: generated this print
-
-        marker = Marker()
-
-        marker.header.frame_id = self.target_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-
-        marker.ns = 'centroid'
-        marker.id = 0
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
-
-        marker.pose.position.x = float(centroid[0])
-        marker.pose.position.y = float(centroid[1])
-        marker.pose.position.z = float(centroid[2])
-
-        marker.pose.orientation.w = 1.0
-
-        marker.scale.x = 0.03
-        marker.scale.y = 0.03
-        marker.scale.z = 0.03
-
-        marker.color.a = 1.0
-        marker.color.r = 1.0
-        marker.color.g = 0.0
-        marker.color.b = 0.0
-
-        self.centroid_publisher.publish(marker)
-        self.get_logger().info(f"found centroid: {centroid}")
-
-        return centroid
-
-    def find_cylinder_object(self, cloud):
-        normals = cloud.estimate_normals(radius = 0.02)
-        valid = np.isfinite(normals).all(axis =1 )
-        valid &= np.linalg.norm(normals, axis=1) > 1e-8
-
-        cloud = cloud.extract(np.flatnonzero(valid).tolist())
-        normals = normals[valid]
-
-        plane_indices, plane_coefficients = cloud.segment_plane(distance_threshold=0.03, max_iterations=100)
-
-        if not plane_indices:
-            raise RuntimeError(f"no plane found :(")
-
-        plane = cloud.extract(plane_indices)
-
-        keep = np.ones(len(cloud), dtype=bool)
-        keep[plane_indices] = False
-        remaining = cloud.extract(np.flatnonzero(keep).tolist())
-        remaining_normals = normals[keep]
-
-        if len(remaining) < 3: 
-            raise RuntimeError(f"Not enough for a cylinder!")
-
-        indices, coefficients = remaining.segment_cylinder(
-            normals = remaining_normals, 
-            distance_threshold = 0.05,
-            min_radius = 0.0,
-            max_radius = 0.1,
-            max_iterations = 10000,
-            normal_distance_weight = 0.1
-        )
-
-        if not indices: 
-            raise RuntimeError(f"No cyliner found :( ")
-
-        cylinder = remaining.extract(indices)
-
-        if cylinder:
-            return cylinder
-
-        return None
 
                 
 def main(args=None):
