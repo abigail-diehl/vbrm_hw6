@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'pc_processing_template = vbrm_hw6.pc_processing_template:main',
         ],
     },
 )
