@@ -18,6 +18,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker
 
 
 def cloud_from_msg(msg):
@@ -88,6 +89,8 @@ class PointCloudGrasping(Node):
             PointCloud2, self.get_parameter('point_cloud_topic_2').value,
             self.cloud_callback2, qos_profile_sensor_data,
         )
+
+        self.centroid_publisher = self.create_publisher(Marker, '~/centroid', 1)
 
         self.grasp_publisher = self.create_publisher(PoseStamped, '~/grasp_pose', 1)
         # Cache only the latest frame; process at a manageable rate.
@@ -165,6 +168,8 @@ class PointCloudGrasping(Node):
         segmentedObjects = filtered.extract(inliers, negative = True)
 
         cylinderObject = self.find_cylinder_object(segmentedObjects)
+
+        centroid = self.find_cylinder_center(cylinderObject)
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
@@ -256,6 +261,41 @@ class PointCloudGrasping(Node):
             curr_cloud = curr_cloud.extract(remaining_indices)
 
         return None, None
+
+    def find_cylinder_center(self, cloud):
+        centroid = np.mean(cloud.xyz, axis=0)
+
+        # Publishing: generated this print
+
+        marker = Marker()
+
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'centroid'
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+
+        marker.pose.position.x = float(centroid[0])
+        marker.pose.position.y = float(centroid[1])
+        marker.pose.position.z = float(centroid[2])
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.03
+        marker.scale.y = 0.03
+        marker.scale.z = 0.03
+
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+
+        self.centroid_publisher.publish(marker)
+        self.get_logger().info(f"found centroid: {centroid}")
+
+        return centroid
 
     def find_cylinder_object(self, cloud):
         normals = cloud.estimate_normals(radius = 0.02)
