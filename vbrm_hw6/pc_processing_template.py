@@ -95,6 +95,7 @@ class PointCloudGrasping(Node):
         self.centroid_publisher = self.create_publisher(Marker, '~/centroid', 1)
         self.normals_publisher = self.create_publisher(Marker, '~/normals', 1)
         self.grasp_points_publisher = self.create_publisher(Marker, '~/grasp_points', 1)
+        self.approach_vector_publisher = self.create_publisher(Marker, '~/approach_vector', 1)
 
 
         self.grasp_publisher = self.create_publisher(PoseStamped, '~/grasp_pose', 1)
@@ -180,11 +181,13 @@ class PointCloudGrasping(Node):
         centroid = self.find_cylinder_center(cylinderObject)
 
         #Part 2.2: Estimate surface normals
-
         surface_norms = self.get_surface_normals(cylinderObject, centroid)
 
+        #Part 2.3: Find grasp pair:
         grasp_pair = self.find_grasp_pair(cylinderObject, surface_norms, centroid)
 
+        #Part 3: Find Approach Vector: 
+        approach_vector = self.calc_principal_axis(cylinderObject, centroid)
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
@@ -206,6 +209,60 @@ class PointCloudGrasping(Node):
         #TODO: estimate the grasp from the PC: 
 
     
+        return None
+
+    def calc_principal_axis(self, cloud, centroid):
+        axis = cloud.pca()["eigenvectors"]
+        major_axis = axis[:, 0] # direction of greatest spread
+        minor_axis = axis[:, 2] # direction of least spread 
+
+        #choose orthogonal to major axis: 
+        appraoch_vector = minor_axis / np.linalg.norm(minor_axis)
+
+        # self.get_logger().info(f"axis shape: {axis.shape}")
+        # self.get_logger().info(f"major axis hape: {major_axis.shape}")
+        # self.get_logger().info(f"minor axis shape: {minor_axis.shape}")
+        # self.get_logger().info(f"centroid shape: {centroid.shape}")
+        # self.get_logger().info(f"approach vector shape: {appraoch_vector.shape}")
+
+        #pub: generated this: 
+
+        #publishing to rViz, generated: 
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'appraoch_vector'
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+
+        start = Point()
+        start.x = float(centroid[0])
+        start.y = float(centroid[1])
+        start.z = float(centroid[2])
+
+        arrow_length = 0.1
+        end = Point()
+        end.x = float(centroid[0] + arrow_length * appraoch_vector[0])
+        end.y = float(centroid[1] + arrow_length * appraoch_vector[1])
+        end.z = float(centroid[2] + arrow_length * appraoch_vector[2])
+
+        marker.points = [start, end]
+
+        marker.scale.x = 0.005
+        marker.scale.y = 0.012
+        marker.scale.z = 0.02
+
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+
+        self.approach_vector_publisher.publish(marker)
+
+        self.get_logger().info(f"appraoch vector!")
+
         return None
 
     def find_grasp_pair(self, cloud, normals, centroid):
@@ -288,7 +345,7 @@ class PointCloudGrasping(Node):
 
         self.grasp_points_publisher.publish(marker)
 
-        self.get_logger().info(f"found grasp pair!")
+        # self.get_logger().info(f"found grasp pair!")
 
         return p1, p2
 
