@@ -216,10 +216,17 @@ class PointCloudGrasping(Node):
         best_pair = None
         best_distance = float('inf')
 
+        minimum_grasp_distance = 0.1
+
+
         for i in range(len(points)):
             for j in range(i + 1, len(points)):
                 p1 = points[i]
                 p2 = points[j]
+
+                point_distance = np.linalg.norm(p1-p2)
+                if point_distance < minimum_grasp_distance: 
+                    continue
 
                 n1 = normals[i]
                 n2 = normals[j]
