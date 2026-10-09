@@ -18,6 +18,8 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 
 
 def cloud_from_msg(msg):
@@ -81,6 +83,7 @@ class PointCloudGrasping(Node):
         self.cloud_publisher = self.create_publisher(
             PointCloud2, '~/processed_cloud', 1,
         )
+        
 
 
         #cam 2 PC sub/pub: 
@@ -88,6 +91,11 @@ class PointCloudGrasping(Node):
             PointCloud2, self.get_parameter('point_cloud_topic_2').value,
             self.cloud_callback2, qos_profile_sensor_data,
         )
+
+        self.centroid_publisher = self.create_publisher(Marker, '~/centroid', 1)
+        self.normals_publisher = self.create_publisher(Marker, '~/normals', 1)
+        self.grasp_points_publisher = self.create_publisher(Marker, '~/grasp_points', 1)
+
 
         self.grasp_publisher = self.create_publisher(PoseStamped, '~/grasp_pose', 1)
         # Cache only the latest frame; process at a manageable rate.
@@ -164,7 +172,19 @@ class PointCloudGrasping(Node):
 
         segmentedObjects = filtered.extract(inliers, negative = True)
 
+
+        #Part 1.5: Cluster the objs
         cylinderObject = self.find_cylinder_object(segmentedObjects)
+
+        #Part 2.1: Calculate the Obj Centroid
+        centroid = self.find_cylinder_center(cylinderObject)
+
+        #Part 2.2: Estimate surface normals
+
+        surface_norms = self.get_surface_normals(cylinderObject, centroid)
+
+        grasp_pair = self.find_grasp_pair(cylinderObject, surface_norms, centroid)
+
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
@@ -180,9 +200,231 @@ class PointCloudGrasping(Node):
 
         return cloud
 
+
     def estimate_grasp(self, cloud) -> Pose | None:
 
-        #TODO: estimate the grasp from the PC
+        #TODO: estimate the grasp from the PC: 
+
+    
+        return None
+
+    def find_grasp_pair(self, cloud, normals, centroid):
+        points = cloud.xyz
+
+        #threshold???
+        normal_dot_threshold = -0.9
+        best_pair = None
+        best_distance = float('inf')
+
+        minimum_grasp_distance = 0.1
+
+
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                p1 = points[i]
+                p2 = points[j]
+
+                point_distance = np.linalg.norm(p1-p2)
+                if point_distance < minimum_grasp_distance: 
+                    continue
+
+                n1 = normals[i]
+                n2 = normals[j]
+
+                normal1 = np.linalg.norm(n1)
+                normal2 = np.linalg.norm(n2)
+
+                if normal1 == 0 or normal2 == 0:
+                    continue
+
+                dot = np.dot(n1 / normal1, n2 / normal2)
+                if dot > normal_dot_threshold:
+                    continue
+
+                distance = (np.linalg.norm(p1 - centroid) + np.linalg.norm(p2 - centroid))
+
+                if distance < best_distance:
+                    best_distance = distance
+                    best_pair = (i,j)
+
+        if best_pair is None: 
+            self.get_logger().info(f"can't find a grasp pair :( ")
+            return None
+
+        i,j = best_pair
+
+        p1 = points[i]
+        p2 = points[j]
+
+        #publishing to rViz, generated: 
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'grasp_points'
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD
+
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.03
+        marker.scale.y = 0.03
+        marker.scale.z = 0.03
+
+
+        marker.color.a = 1.0
+        marker.color.r = 0.0
+        marker.color.g = 0.0
+        marker.color.b = 1.0
+
+        for p in (p1, p2):
+            point = Point()
+            point.x = float(p[0])
+            point.y = float(p[1])
+            point.z = float(p[2])
+            marker.points.append(point)
+
+        self.grasp_points_publisher.publish(marker)
+
+        self.get_logger().info(f"found grasp pair!")
+
+        return p1, p2
+
+    def get_surface_normals(self, cloud, viewpoint):
+        viewpoint = [0.0, 0.0, 1.0]
+        normals = cloud.estimate_normals(radius = 0.3)
+        # self.get_logger().info(f"normal array shape: {normals.shape}")
+
+        valid = np.isfinite(normals).all(axis=1)
+        valid &= np.linalg.norm(normals, axis = 1) > 1e-8
+
+        usableCloud = cloud.extract(np.flatnonzero(valid).tolist())
+        usableNormals = normals[valid]
+
+        if len(usableCloud) == 0: 
+            raise RuntimeError("No usable normals :(")
+
+        withCurvature = cloud.normals_with_curvature(
+            radius = 0.03, viewpoint = viewpoint)
+
+        #publishing: generated this part
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'surface_norms'
+        marker.id = 0
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.03
+
+        marker.color.a = 1.0
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+
+        line_length = 0.03
+        for point, normal in zip(cloud.xyz, normals):
+            start = Point()
+            start.x = float(point[0])
+            start.y = float(point[1])
+            start.z = float(point[2])
+
+            end = Point()
+            end.x = float(point[0] + line_length * normal[0])
+            end.y = float(point[1] + line_length * normal[1])
+            end.z = float(point[2] + line_length * normal[2])
+
+            marker.points.append(start)
+            marker.points.append(end)
+
+
+        self.normals_publisher.publish(marker)
+
+        return withCurvature
+
+
+
+    def find_cylinder_center(self, cloud):
+            centroid = np.mean(cloud.xyz, axis=0)
+    
+            # Publishing: generated this print
+    
+            marker = Marker()
+    
+            marker.header.frame_id = self.target_frame
+            marker.header.stamp = self.get_clock().now().to_msg()
+    
+            marker.ns = 'centroid'
+            marker.id = 0
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+    
+            marker.pose.position.x = float(centroid[0])
+            marker.pose.position.y = float(centroid[1])
+            marker.pose.position.z = float(centroid[2])
+    
+            marker.pose.orientation.w = 1.0
+    
+            marker.scale.x = 0.03
+            marker.scale.y = 0.03
+            marker.scale.z = 0.03
+    
+            marker.color.a = 1.0
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+    
+            self.centroid_publisher.publish(marker)
+            # self.get_logger().info(f"found centroid: {centroid}")
+    
+            return centroid
+    
+    def find_cylinder_object(self, cloud):
+        normals = cloud.estimate_normals(radius = 0.02)
+        valid = np.isfinite(normals).all(axis =1 )
+        valid &= np.linalg.norm(normals, axis=1) > 1e-8
+
+        cloud = cloud.extract(np.flatnonzero(valid).tolist())
+        normals = normals[valid]
+
+        plane_indices, plane_coefficients = cloud.segment_plane(distance_threshold=0.03, max_iterations=100)
+
+        if not plane_indices:
+            raise RuntimeError(f"no plane found :(")
+
+        plane = cloud.extract(plane_indices)
+
+        keep = np.ones(len(cloud), dtype=bool)
+        keep[plane_indices] = False
+        remaining = cloud.extract(np.flatnonzero(keep).tolist())
+        remaining_normals = normals[keep]
+
+        if len(remaining) < 3: 
+            raise RuntimeError(f"Not enough for a cylinder!")
+
+        indices, coefficients = remaining.segment_cylinder(
+            normals = remaining_normals, 
+            distance_threshold = 0.05,
+            min_radius = 0.0,
+            max_radius = 0.1,
+            max_iterations = 10000,
+            normal_distance_weight = 0.1
+        )
+
+        if not indices: 
+            raise RuntimeError(f"No cyliner found :( ")
+
+        cylinder = remaining.extract(indices)
+
+        if cylinder:
+            return cylinder
 
         return None
 
@@ -201,9 +443,9 @@ class PointCloudGrasping(Node):
                 max_iterations=50
             )
 
-            self.get_logger().info(
-                f"Plane {i}: {len(inliers)} inliers"
-            )
+            # self.get_logger().info(
+            #     f"Plane {i}: {len(inliers)} inliers"
+            # )
 
             if not inliers:
                 break
@@ -257,47 +499,6 @@ class PointCloudGrasping(Node):
 
         return None, None
 
-    def find_cylinder_object(self, cloud):
-        normals = cloud.estimate_normals(radius = 0.02)
-        valid = np.isfinite(normals).all(axis =1 )
-        valid &= np.linalg.norm(normals, axis=1) > 1e-8
-
-        cloud = cloud.extract(np.flatnonzero(valid).tolist())
-        normals = normals[valid]
-
-        plane_indices, plane_coefficients = cloud.segment_plane(distance_threshold=0.03, max_iterations=100)
-
-        if not plane_indices:
-            raise RuntimeError(f"no plane found :(")
-
-        plane = cloud.extract(plane_indices)
-
-        keep = np.ones(len(cloud), dtype=bool)
-        keep[plane_indices] = False
-        remaining = cloud.extract(np.flatnonzero(keep).tolist())
-        remaining_normals = normals[keep]
-
-        if len(remaining) < 3: 
-            raise RuntimeError(f"Not enough for a cylinder!")
-
-        indices, coefficients = remaining.segment_cylinder(
-            normals = remaining_normals, 
-            distance_threshold = 0.05,
-            min_radius = 0.0,
-            max_radius = 0.1,
-            max_iterations = 10000,
-            normal_distance_weight = 0.1
-        )
-
-        if not indices: 
-            raise RuntimeError(f"No cyliner found :( ")
-
-        cylinder = remaining.extract(indices)
-
-        if cylinder:
-            return cylinder
-
-        return None
 
                 
 def main(args=None):
