@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2
+from geometry_msgs.msg import Vector3Stamped
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -94,13 +95,15 @@ class PointCloudGrasping(Node):
 
         self.centroid_publisher = self.create_publisher(Marker, '~/centroid', 1)
         self.normals_publisher = self.create_publisher(Marker, '~/normals', 1)
-        self.grasp_points_publisher = self.create_publisher(Marker, '~/grasp_points', 1)
-        self.approach_vector_publisher = self.create_publisher(Marker, '~/approach_vector', 1)
+        self.grasp_points_publisher = self.create_publisher(Marker, '/grasp_points', 1)
+        self.approach_vector_publisher = self.create_publisher(Marker, '/approach_vector', 1)
+        self.approach_msg_publisher = self.create_publisher(Vector3Stamped, '/approach_msg', 1)
 
-
-        self.grasp_publisher = self.create_publisher(PoseStamped, '~/grasp_pose', 1)
+        self.grasp_publisher = self.create_publisher(PoseStamped, '/grasp_pose', 1)
         # Cache only the latest frame; process at a manageable rate.
         self.timer = self.create_timer(period, self.process_latest_cloud)
+
+        self.published = False
 
         self.get_logger().info(f"PC node started!")
 
@@ -113,6 +116,11 @@ class PointCloudGrasping(Node):
         self.latest_cloud2 = msg
 
     def process_latest_cloud(self):
+
+        if self.published: 
+            # self.get_logger().info(f"rejected")
+            return
+
         msg = self.latest_cloud
         msg2 = self.latest_cloud2
         if msg is None or msg2 is None:
@@ -167,6 +175,14 @@ class PointCloudGrasping(Node):
             self.get_logger().info(f"Could not find horizontal plane")
             return 
 
+        #help 
+        table_normal = np.array(coefficients[:3], dtype = float)
+        magnitude = np.linalg.norm(table_normal)
+
+        table_normal = table_normal / magnitude
+        if table_normal[2] < 0:
+            table_normal = -table_normal
+
         segmented = filtered.extract(inliers)
 
         #Part 1.4: Segment the Objects: 
@@ -185,17 +201,32 @@ class PointCloudGrasping(Node):
 
         #Part 2.3: Find grasp pair:
         grasp_pair = self.find_grasp_pair(cylinderObject, surface_norms, centroid)
+        if grasp_pair is None:
+            self.get_logger().info(f"no valid grasp pair :(")
+            return 
 
-        #Part 3: Find Approach Vector: 
-        approach_vector = self.calc_principal_axis(cylinderObject, centroid)
+        #Part 3: Find Approach Vector: test! 
+        approach_vector = self.calc_principal_axis(cylinderObject, centroid, table_normal)
+        if approach_vector  is None:
+            self.get_logger().info(f"no valid approach vector :(")
+            return 
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
 
-        pose = self.estimate_grasp(segmented)
+        pose = self.estimate_grasp(grasp_pair, approach_vector)
 
-        if pose is not None :
-            self.grasp_publisher.publish(PoseStamped(header=header, pose=pose))
+        if pose is not None:
+            grasp_pose_msg = PoseStamped()
+            grasp_pose_msg.header = header
+            grasp_pose_msg.pose = pose
+
+            self.grasp_publisher.publish(grasp_pose_msg)
+
+            self.get_logger().info("grasp pose!")
+            self.published = True
+        else:
+            self.get_logger().warning("Could not estimate grasp pose.")
 
     def process_cloud(self, cloud):
         cloud = cloud.voxel_grid(self.voxel_size)
@@ -204,14 +235,38 @@ class PointCloudGrasping(Node):
         return cloud
 
 
-    def estimate_grasp(self, cloud) -> Pose | None:
+    def estimate_grasp(self, pair, vector) -> Pose | None:
 
         #TODO: estimate the grasp from the PC: 
+        p1, p2 = pair
 
+        #pose: 
+        #midpoint: of the pairs, different than the centroid
+        grasp_position = (p1 + p2) / 2.0
+
+        pose = Pose()
+        pose.position.x = float(grasp_position[0])
+        pose.position.y = float(grasp_position[1])
+        pose.position.z = float(grasp_position[2])
+
+        pose.orientation.x = 1.0
+        pose.orientation.y = 0.0
+        pose.orientation.z = 0.0
+        pose.orientation.w = 0.0
+
+        approach_msg = Vector3Stamped()
+        approach_msg.header.stamp = self.get_clock().now().to_msg()
+        approach_msg.header.frame_id = self.target_frame
+
+        approach_msg.vector.x = float(vector[0])
+        approach_msg.vector.y = float(vector[1])
+        approach_msg.vector.z = float(vector[2])
+
+        self.approach_msg_publisher.publish(approach_msg)
     
-        return None
+        return pose
 
-    def calc_principal_axis(self, cloud, centroid):
+    def calc_principal_axis(self, cloud, centroid, table_normal):
         axis = cloud.pca()["eigenvectors"]
         major_axis = axis[:, 0] # direction of greatest spread
         minor_axis = axis[:, 2] # direction of least spread 
@@ -226,6 +281,7 @@ class PointCloudGrasping(Node):
         # self.get_logger().info(f"approach vector shape: {appraoch_vector.shape}")
 
         #pub: generated this: 
+        appraoch_vector = table_normal
 
         #publishing to rViz, generated: 
         marker = Marker()
@@ -261,9 +317,9 @@ class PointCloudGrasping(Node):
 
         self.approach_vector_publisher.publish(marker)
 
-        self.get_logger().info(f"appraoch vector!")
+        self.get_logger().info(f"approach vector!")
 
-        return None
+        return appraoch_vector
 
     def find_grasp_pair(self, cloud, normals, centroid):
         points = cloud.xyz
@@ -311,7 +367,10 @@ class PointCloudGrasping(Node):
         i,j = best_pair
 
         p1 = points[i]
+        p1[2] = centroid[2]
+
         p2 = points[j]
+        p2[2] = centroid[2]
 
         #publishing to rViz, generated: 
         marker = Marker()
