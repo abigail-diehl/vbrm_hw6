@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'pc_processing_template = vbrm_hw6.pc_processing_template:main',
+            'move_to_start = vbrm_hw6.move_to_start:main',
+            'grasp_cylinder = vbrm_hw6.grasp_cylinder:main',
         ],
     },
 )
