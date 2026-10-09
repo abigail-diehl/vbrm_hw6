@@ -19,6 +19,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 
 
 def cloud_from_msg(msg):
@@ -82,6 +83,7 @@ class PointCloudGrasping(Node):
         self.cloud_publisher = self.create_publisher(
             PointCloud2, '~/processed_cloud', 1,
         )
+        
 
 
         #cam 2 PC sub/pub: 
@@ -91,6 +93,9 @@ class PointCloudGrasping(Node):
         )
 
         self.centroid_publisher = self.create_publisher(Marker, '~/centroid', 1)
+        self.normals_publisher = self.create_publisher(Marker, '~/normals', 1)
+        self.grasp_points_publisher = self.create_publisher(Marker, '~/grasp_points', 1)
+
 
         self.grasp_publisher = self.create_publisher(PoseStamped, '~/grasp_pose', 1)
         # Cache only the latest frame; process at a manageable rate.
@@ -176,6 +181,10 @@ class PointCloudGrasping(Node):
 
         #Part 2.2: Estimate surface normals
 
+        surface_norms = self.get_surface_normals(cylinderObject, centroid)
+
+        grasp_pair = self.find_grasp_pair(cylinderObject, surface_norms, centroid)
+
 
         header = Header(stamp = msg.header.stamp, frame_id=self.target_frame)
         self.cloud_publisher.publish(point_cloud2.create_cloud_xyz32(header, cylinderObject.xyz))
@@ -191,10 +200,95 @@ class PointCloudGrasping(Node):
 
         return cloud
 
+
+    def estimate_grasp(self, cloud) -> Pose | None:
+
+        #TODO: estimate the grasp from the PC: 
+
+    
+        return None
+
+    def find_grasp_pair(self, cloud, normals, centroid):
+        points = cloud.xyz
+
+        #threshold???
+        normal_dot_threshold = -0.9
+        best_pair = None
+        best_distance = float('inf')
+
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                p1 = points[i]
+                p2 = points[j]
+
+                n1 = normals[i]
+                n2 = normals[j]
+
+                normal1 = np.linalg.norm(n1)
+                normal2 = np.linalg.norm(n2)
+
+                if normal1 == 0 or normal2 == 0:
+                    continue
+
+                dot = np.dot(n1 / normal1, n2 / normal2)
+                if dot > normal_dot_threshold:
+                    continue
+
+                distance = (np.linalg.norm(p1 - centroid) + np.linalg.norm(p2 - centroid))
+
+                if distance < best_distance:
+                    best_distance = distance
+                    best_pair = (i,j)
+
+        if best_pair is None: 
+            self.get_logger().info(f"can't find a grasp pair :( ")
+            return None
+
+        i,j = best_pair
+
+        p1 = points[i]
+        p2 = points[j]
+
+        #publishing to rViz, generated: 
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'grasp_points'
+        marker.id = 0
+        marker.type = Marker.SPHERE_LIST
+        marker.action = Marker.ADD
+
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.03
+        marker.scale.y = 0.03
+        marker.scale.z = 0.03
+
+
+        marker.color.a = 1.0
+        marker.color.r = 0.0
+        marker.color.g = 0.0
+        marker.color.b = 1.0
+
+        for p in (p1, p2):
+            point = Point()
+            point.x = float(p[0])
+            point.y = float(p[1])
+            point.z = float(p[2])
+            marker.points.append(point)
+
+        self.grasp_points_publisher.publish(marker)
+
+        self.get_logger().info(f"found grasp pair!")
+
+        return p1, p2
+
     def get_surface_normals(self, cloud, viewpoint):
         viewpoint = [0.0, 0.0, 1.0]
         normals = cloud.estimate_normals(radius = 0.3)
-        self.get_logger().info(f"nromal array shape: {normals.shape}")
+        # self.get_logger().info(f"normal array shape: {normals.shape}")
 
         valid = np.isfinite(normals).all(axis=1)
         valid &= np.linalg.norm(normals, axis = 1) > 1e-8
@@ -208,14 +302,46 @@ class PointCloudGrasping(Node):
         withCurvature = cloud.normals_with_curvature(
             radius = 0.03, viewpoint = viewpoint)
 
+        #publishing: generated this part
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'surface_norms'
+        marker.id = 0
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.03
+
+        marker.color.a = 1.0
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+
+        line_length = 0.03
+        for point, normal in zip(cloud.xyz, normals):
+            start = Point()
+            start.x = float(point[0])
+            start.y = float(point[1])
+            start.z = float(point[2])
+
+            end = Point()
+            end.x = float(point[0] + line_length * normal[0])
+            end.y = float(point[1] + line_length * normal[1])
+            end.z = float(point[2] + line_length * normal[2])
+
+            marker.points.append(start)
+            marker.points.append(end)
+
+
+        self.normals_publisher.publish(marker)
 
         return withCurvature
 
-    def estimate_grasp(self, cloud) -> Pose | None:
-
-        #TODO: estimate the grasp from the PC
-
-        return None
 
 
     def find_cylinder_center(self, cloud):
@@ -249,7 +375,7 @@ class PointCloudGrasping(Node):
             marker.color.b = 0.0
     
             self.centroid_publisher.publish(marker)
-            self.get_logger().info(f"found centroid: {centroid}")
+            # self.get_logger().info(f"found centroid: {centroid}")
     
             return centroid
     
@@ -310,9 +436,9 @@ class PointCloudGrasping(Node):
                 max_iterations=50
             )
 
-            self.get_logger().info(
-                f"Plane {i}: {len(inliers)} inliers"
-            )
+            # self.get_logger().info(
+            #     f"Plane {i}: {len(inliers)} inliers"
+            # )
 
             if not inliers:
                 break
